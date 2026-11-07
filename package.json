@@ -37,6 +37,10 @@
         "title": "Popup File Explorer: Remove Selected File or Folder"
       },
       {
+        "command": "popupFileExplorer.renameEntry",
+        "title": "Popup File Explorer: Rename Selected File or Folder"
+      },
+      {
         "command": "popupFileExplorer.collapseAll",
         "title": "Popup File Explorer: Collapse All Folders"
       },
@@ -85,6 +89,11 @@
       {
         "command": "popupFileExplorer.deleteEntry",
         "key": "d",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.renameEntry",
+        "key": "r",
         "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
       },
       {

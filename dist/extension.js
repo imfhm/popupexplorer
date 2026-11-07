@@ -38,7 +38,7 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 let popupActions;
 function activate(context) {
-    context.subscriptions.push(vscode.commands.registerCommand('popupFileExplorer.open', () => openExplorer()), vscode.commands.registerCommand('popupFileExplorer.focusUp', () => popupActions?.moveActiveItem(-1)), vscode.commands.registerCommand('popupFileExplorer.focusDown', () => popupActions?.moveActiveItem(1)), vscode.commands.registerCommand('popupFileExplorer.toggleExpand', () => popupActions?.toggleActiveFolder()), vscode.commands.registerCommand('popupFileExplorer.deleteEntry', () => popupActions?.deleteActiveEntry()), vscode.commands.registerCommand('popupFileExplorer.collapseAll', () => popupActions?.collapseAllFolders()), vscode.commands.registerCommand('popupFileExplorer.createFile', () => popupActions?.startCreateEntry('file')), vscode.commands.registerCommand('popupFileExplorer.createFolder', () => popupActions?.startCreateEntry('directory')), vscode.commands.registerCommand('popupFileExplorer.focusTree', () => popupActions?.setNavigationMode(true)), vscode.commands.registerCommand('popupFileExplorer.focusSearch', () => popupActions?.setNavigationMode(false)), vscode.commands.registerCommand('popupFileExplorer.toggleNavigationMode', () => popupActions?.toggleNavigationMode()));
+    context.subscriptions.push(vscode.commands.registerCommand('popupFileExplorer.open', () => openExplorer()), vscode.commands.registerCommand('popupFileExplorer.focusUp', () => popupActions?.moveActiveItem(-1)), vscode.commands.registerCommand('popupFileExplorer.focusDown', () => popupActions?.moveActiveItem(1)), vscode.commands.registerCommand('popupFileExplorer.toggleExpand', () => popupActions?.toggleActiveFolder()), vscode.commands.registerCommand('popupFileExplorer.deleteEntry', () => popupActions?.deleteActiveEntry()), vscode.commands.registerCommand('popupFileExplorer.renameEntry', () => popupActions?.renameActiveEntry()), vscode.commands.registerCommand('popupFileExplorer.collapseAll', () => popupActions?.collapseAllFolders()), vscode.commands.registerCommand('popupFileExplorer.createFile', () => popupActions?.startCreateEntry('file')), vscode.commands.registerCommand('popupFileExplorer.createFolder', () => popupActions?.startCreateEntry('directory')), vscode.commands.registerCommand('popupFileExplorer.focusTree', () => popupActions?.setNavigationMode(true)), vscode.commands.registerCommand('popupFileExplorer.focusSearch', () => popupActions?.setNavigationMode(false)), vscode.commands.registerCommand('popupFileExplorer.toggleNavigationMode', () => popupActions?.toggleNavigationMode()));
 }
 function openExplorer(initialSelectionUri) {
     const quickPick = vscode.window.createQuickPick();
@@ -270,6 +270,61 @@ function openExplorer(initialSelectionUri) {
             openExplorer(activeItem.uri);
         });
     };
+    const renameActiveEntry = () => {
+        const activeItem = getActiveItem();
+        if (!activeItem) {
+            return;
+        }
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(activeItem.uri);
+        if (!workspaceFolder) {
+            void vscode.window.showErrorMessage('Popup File Explorer: Only workspace files and folders can be renamed.');
+            return;
+        }
+        if (activeItem.uri.toString() === workspaceFolder.uri.toString()) {
+            void vscode.window.showErrorMessage('Popup File Explorer: A workspace root cannot be renamed from this view.');
+            return;
+        }
+        const parentUri = vscode.Uri.joinPath(activeItem.uri, '..');
+        const input = vscode.window.showInputBox({
+            title: `Rename ${activeItem.entryKind === 'directory' ? 'Folder' : 'File'}`,
+            prompt: `Rename in ${vscode.workspace.asRelativePath(parentUri, false) || workspaceFolder.name}`,
+            value: activeItem.uri.path.split('/').pop() ?? '',
+            ignoreFocusOut: true,
+            validateInput: (value) => {
+                const name = value.trim();
+                if (!name) {
+                    return 'Enter a name.';
+                }
+                if (name === '.' || name === '..' || /[\\/]/.test(name)) {
+                    return 'Enter a single name without path separators.';
+                }
+                return undefined;
+            },
+        });
+        void input.then(async (value) => {
+            if (value === undefined) {
+                openExplorer(activeItem.uri);
+                return;
+            }
+            const newName = value.trim();
+            const newUri = vscode.Uri.joinPath(parentUri, newName);
+            if (newUri.toString() === activeItem.uri.toString()) {
+                openExplorer(activeItem.uri);
+                return;
+            }
+            try {
+                await vscode.workspace.fs.rename(activeItem.uri, newUri, { overwrite: false });
+                openExplorer(newUri);
+            }
+            catch (error) {
+                showError(error);
+                openExplorer(activeItem.uri);
+            }
+        }, (error) => {
+            showError(error);
+            openExplorer(activeItem.uri);
+        });
+    };
     const startCreateEntry = (kind) => {
         const activeItem = getActiveItem();
         const activeEntry = activeItem ? findEntry(visibleEntries, activeItem.uri) : undefined;
@@ -351,6 +406,7 @@ function openExplorer(initialSelectionUri) {
             }
         },
         deleteActiveEntry,
+        renameActiveEntry,
         collapseAllFolders,
         startCreateEntry,
         setNavigationMode,
