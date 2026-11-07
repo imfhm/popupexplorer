@@ -1,0 +1,136 @@
+{
+  "name": "popup-file-explorer",
+  "displayName": "Popup File Explorer",
+  "description": "Open a searchable workspace file popup from a keyboard shortcut.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:popupFileExplorer.open"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "popupFileExplorer.open",
+        "title": "Popup File Explorer: Open"
+      },
+      {
+        "command": "popupFileExplorer.focusUp",
+        "title": "Popup File Explorer: Focus Previous Entry"
+      },
+      {
+        "command": "popupFileExplorer.focusDown",
+        "title": "Popup File Explorer: Focus Next Entry"
+      },
+      {
+        "command": "popupFileExplorer.toggleExpand",
+        "title": "Popup File Explorer: Toggle Folder"
+      },
+      {
+        "command": "popupFileExplorer.deleteEntry",
+        "title": "Popup File Explorer: Remove Selected File or Folder"
+      },
+      {
+        "command": "popupFileExplorer.collapseAll",
+        "title": "Popup File Explorer: Collapse All Folders"
+      },
+      {
+        "command": "popupFileExplorer.focusTree",
+        "title": "Popup File Explorer: Enable Tree Navigation"
+      },
+      {
+        "command": "popupFileExplorer.focusSearch",
+        "title": "Popup File Explorer: Enable Search Input"
+      },
+      {
+        "command": "popupFileExplorer.toggleNavigationMode",
+        "title": "Popup File Explorer: Toggle Search and Tree Navigation"
+      },
+      {
+        "command": "popupFileExplorer.createFile",
+        "title": "Popup File Explorer: Create File"
+      },
+      {
+        "command": "popupFileExplorer.createFolder",
+        "title": "Popup File Explorer: Create Folder"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "popupFileExplorer.open",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e"
+      },
+      {
+        "command": "popupFileExplorer.focusUp",
+        "key": "w",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.focusDown",
+        "key": "s",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.toggleExpand",
+        "key": "space",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.deleteEntry",
+        "key": "d",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.collapseAll",
+        "key": "a",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.focusTree",
+        "key": "alt+s",
+        "when": "popupFileExplorerVisible"
+      },
+      {
+        "command": "popupFileExplorer.focusSearch",
+        "key": "alt+w",
+        "when": "popupFileExplorerVisible"
+      },
+      {
+        "command": "popupFileExplorer.toggleNavigationMode",
+        "key": "tab",
+        "when": "popupFileExplorerVisible"
+      },
+      {
+        "command": "popupFileExplorer.focusSearch",
+        "key": "shift+tab",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.createFile",
+        "key": "n",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.createFolder",
+        "key": "m",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "check-types": "tsc -p ./ --noEmit",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.2"
+  }
+}
