@@ -16,12 +16,26 @@ interface ExplorerQuickPickItem extends vscode.QuickPickItem {
   entryKind: EntryKind;
 }
 
+interface ShortcutQuickPickItem extends vscode.QuickPickItem {
+  shortcutMenu: true;
+}
+
+type PopupQuickPickItem = ExplorerQuickPickItem | ShortcutQuickPickItem;
+
+function isExplorerQuickPickItem(item: PopupQuickPickItem | undefined): item is ExplorerQuickPickItem {
+  return item !== undefined && !('shortcutMenu' in item);
+}
+
 interface PopupActions {
   moveActiveItem: (offset: number) => void;
   toggleActiveFolder: () => void;
   deleteActiveEntry: () => void;
   renameActiveEntry: () => void;
+  cutActiveEntry: () => void;
+  pasteEntry: () => void;
+  undoDelete: () => void;
   collapseAllFolders: () => void;
+  toggleHiddenFiles: () => void;
   startCreateEntry: (kind: EntryKind) => void;
   setNavigationMode: (enabled: boolean) => void;
   toggleNavigationMode: () => void;
@@ -29,9 +43,21 @@ interface PopupActions {
 
 let popupActions: PopupActions | undefined;
 
+interface DeletedFileBackup {
+  originalUri: string;
+  backupUri: string;
+}
+
+interface ExplorerVisibilityFilter {
+  excludePattern?: string;
+}
+
+const undoDeleteStateKey = 'popupFileExplorer.deletedFileBackups';
+
 export function activate(context: vscode.ExtensionContext): void {
+  const deletedFileBackups = context.globalState.get<DeletedFileBackup[]>(undoDeleteStateKey, []);
   context.subscriptions.push(
-    vscode.commands.registerCommand('popupFileExplorer.open', () => openExplorer()),
+    vscode.commands.registerCommand('popupFileExplorer.open', () => openExplorer(context)),
     vscode.commands.registerCommand(
       'popupFileExplorer.focusUp',
       () => popupActions?.moveActiveItem(-1),
@@ -53,8 +79,24 @@ export function activate(context: vscode.ExtensionContext): void {
       () => popupActions?.renameActiveEntry(),
     ),
     vscode.commands.registerCommand(
+      'popupFileExplorer.cutEntry',
+      () => popupActions?.cutActiveEntry(),
+    ),
+    vscode.commands.registerCommand(
+      'popupFileExplorer.pasteEntry',
+      () => popupActions?.pasteEntry(),
+    ),
+    vscode.commands.registerCommand(
+      'popupFileExplorer.undoDelete',
+      () => popupActions?.undoDelete(),
+    ),
+    vscode.commands.registerCommand(
       'popupFileExplorer.collapseAll',
       () => popupActions?.collapseAllFolders(),
+    ),
+    vscode.commands.registerCommand(
+      'popupFileExplorer.toggleHiddenFiles',
+      () => popupActions?.toggleHiddenFiles(),
     ),
     vscode.commands.registerCommand(
       'popupFileExplorer.createFile',
@@ -77,10 +119,58 @@ export function activate(context: vscode.ExtensionContext): void {
       () => popupActions?.toggleNavigationMode(),
     ),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('popupFileExplorer._deleteFileWithUndo', async (uri: vscode.Uri) => {
+      const backupUri = vscode.Uri.joinPath(context.globalStorageUri, 'deleted', `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(backupUri, '..'));
+      await vscode.workspace.fs.copy(uri, backupUri, { overwrite: false });
+      const backup = { originalUri: uri.toString(), backupUri: backupUri.toString() };
+      deletedFileBackups.push(backup);
+      try {
+        await context.globalState.update(undoDeleteStateKey, deletedFileBackups);
+        await vscode.workspace.fs.delete(uri, { useTrash: true });
+      } catch (error) {
+        deletedFileBackups.pop();
+        await context.globalState.update(undoDeleteStateKey, deletedFileBackups);
+        await vscode.workspace.fs.delete(backupUri);
+        throw error;
+      }
+    }),
+    vscode.commands.registerCommand('popupFileExplorer._undoDelete', async (): Promise<string> => {
+      const backup = deletedFileBackups[deletedFileBackups.length - 1];
+      if (!backup) {
+        throw new Error('There is no recently deleted file to restore.');
+      }
+
+      const originalUri = vscode.Uri.parse(backup.originalUri);
+      try {
+        await vscode.workspace.fs.stat(originalUri);
+        throw new Error(`Cannot restore "${originalUri.path}": an entry already exists there.`);
+      } catch (error) {
+        if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') {
+          throw error;
+        }
+      }
+
+      await vscode.workspace.fs.copy(vscode.Uri.parse(backup.backupUri), originalUri, { overwrite: false });
+      await vscode.workspace.fs.delete(vscode.Uri.parse(backup.backupUri));
+      deletedFileBackups.pop();
+      await context.globalState.update(undoDeleteStateKey, deletedFileBackups);
+      return originalUri.toString();
+    }),
+  );
 }
 
-function openExplorer(initialSelectionUri?: vscode.Uri): void {
-  const quickPick = vscode.window.createQuickPick<ExplorerQuickPickItem>();
+function openExplorer(
+  context: vscode.ExtensionContext,
+  initialSelectionUri?: vscode.Uri,
+  cutUri?: vscode.Uri,
+  includeExcludedEntries = false,
+): void {
+  const quickPick = vscode.window.createQuickPick<PopupQuickPickItem>();
+  let currentCutUri = cutUri;
+  let showExcludedEntries = includeExcludedEntries;
   const roots: ExplorerEntry[] = (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
     uri: folder.uri,
     name: folder.name,
@@ -93,6 +183,48 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   let searchMode = false;
   let treeNavigationMode = true;
   let lastActiveUri: vscode.Uri | undefined;
+  const visibleEntryIdsByDirectory = new Map<string, Set<string>>();
+  let shortcutMenuOpen = false;
+  let explorerStateBeforeShortcutMenu: {
+    items: readonly PopupQuickPickItem[];
+    activeItems: readonly PopupQuickPickItem[];
+    visibleEntries: ExplorerEntry[];
+    title: string | undefined;
+    placeholder: string | undefined;
+    prompt: string | undefined;
+    value: string;
+    matchOnDescription: boolean;
+    treeNavigationMode: boolean;
+  } | undefined;
+  const shortcutsButton: vscode.QuickInputButton = {
+    iconPath: new vscode.ThemeIcon('menu'),
+    tooltip: 'Show keyboard shortcuts',
+  };
+  const shortcuts = [
+    { category: 'Explorer navigation', bindings: [
+      ['W / S', 'Move selection'],
+      ['Space', 'Expand or collapse folder'],
+      ['A', 'Collapse all folders'],
+    ] },
+    { category: 'File operations', bindings: [
+      ['D', 'Remove selected file or folder'],
+      ['R', 'Rename selected file or folder'],
+      ['N / M', 'Create file / folder'],
+      ['H', 'Show or hide Files: Exclude entries'],
+      ['Ctrl+X / Ctrl+V', 'Cut / paste selected entry'],
+      ['Ctrl+Z', 'Restore the last removed file'],
+    ] },
+    { category: 'Focus and search', bindings: [
+      ['Tab', 'Toggle Explorer / Search'],
+      ['Alt+S', 'Focus Explorer'],
+      ['Alt+W', 'Focus Search'],
+      ['Shift+Tab', 'Focus Search from Explorer'],
+    ] },
+    { category: 'Open popup', bindings: [
+      ['Ctrl+Alt+E', 'Open Popup File Explorer (Windows / Linux)'],
+      ['Cmd+Option+E', 'Open Popup File Explorer (macOS)'],
+    ] },
+  ];
 
   quickPick.title = 'Popup File Explorer';
   quickPick.placeholder = roots.length
@@ -100,10 +232,32 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
     : 'Open a workspace folder to browse files';
   quickPick.matchOnDescription = true;
   quickPick.ignoreFocusOut = false;
+  quickPick.buttons = [shortcutsButton];
 
   const showError = (error: unknown): void => {
     const detail = error instanceof Error ? error.message : String(error);
     void vscode.window.showErrorMessage(`Popup File Explorer: ${detail}`);
+  };
+  const reopen = (
+    uri?: vscode.Uri,
+    nextCutUri = currentCutUri,
+    nextIncludeExcludedEntries = showExcludedEntries,
+  ): void => {
+    openExplorer(context, uri, nextCutUri, nextIncludeExcludedEntries);
+  };
+
+  const getVisibilityFilter = (): ExplorerVisibilityFilter => {
+    if (showExcludedEntries) {
+      return {};
+    }
+
+    const excludes = vscode.workspace.getConfiguration('files').get<Record<string, boolean>>('exclude', {});
+    const patterns = Object.entries(excludes)
+      .filter(([, excluded]) => excluded)
+      .map(([pattern]) => pattern);
+    return patterns.length > 0
+      ? { excludePattern: patterns.length === 1 ? patterns[0] : `{${patterns.join(',')}}` }
+      : {};
   };
 
   const setContext = (key: string, value: boolean): void => {
@@ -111,10 +265,14 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   };
 
   const setNavigationMode = (enabled: boolean): void => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+
     const changed = treeNavigationMode !== enabled;
     if (changed && !enabled) {
       const activeItem = quickPick.activeItems[0];
-      if (activeItem) {
+      if (isExplorerQuickPickItem(activeItem)) {
         lastActiveUri = activeItem.uri;
       }
       quickPick.activeItems = [];
@@ -124,22 +282,107 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
     setContext('popupFileExplorerTreeFocus', enabled);
     if (changed && enabled) {
       const activeItem = quickPick.items.find(
-        (item) => item.uri.toString() === lastActiveUri?.toString(),
+        (item) => isExplorerQuickPickItem(item) && item.uri.toString() === lastActiveUri?.toString(),
       ) ?? quickPick.items[0];
-      quickPick.activeItems = activeItem ? [activeItem] : [];
+      quickPick.activeItems = isExplorerQuickPickItem(activeItem) ? [activeItem] : [];
     }
+    const cutHint = currentCutUri
+      ? ` | CUT: ${currentCutUri.path.split('/').pop()}  Ctrl+V: move`
+      : '';
     quickPick.prompt = enabled
-      ? 'EXPLORER | W/S: move  Space: expand/collapse  D: remove  N/M: create file/folder  Tab: search'
-      : 'SEARCH | Type to filter files  Tab: Explorer';
+      ? `EXPLORER${cutHint}`
+      : 'SEARCH';
   };
 
   const toggleNavigationMode = (): void => {
+    if (shortcutMenuOpen) {
+      return;
+    }
     setNavigationMode(!treeNavigationMode);
   };
 
+  const openShortcutMenu = (): void => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+
+    explorerStateBeforeShortcutMenu = {
+      items: quickPick.items,
+      activeItems: quickPick.activeItems,
+      visibleEntries,
+      title: quickPick.title,
+      placeholder: quickPick.placeholder,
+      prompt: quickPick.prompt,
+      value: quickPick.value,
+      matchOnDescription: quickPick.matchOnDescription,
+      treeNavigationMode,
+    };
+    setNavigationMode(false);
+    shortcutMenuOpen = true;
+    ++searchRequest;
+    quickPick.title = 'Popup File Explorer — Keyboard Shortcuts';
+    quickPick.placeholder = 'Keyboard shortcuts';
+    quickPick.prompt = 'Use the back button to return to the explorer';
+    quickPick.value = '';
+    quickPick.matchOnDescription = true;
+    quickPick.buttons = [vscode.QuickInputButtons.Back];
+    quickPick.activeItems = [];
+    quickPick.items = shortcuts.flatMap(({ category, bindings }) => [
+      { label: category, kind: vscode.QuickPickItemKind.Separator, shortcutMenu: true as const },
+      ...bindings.map(([key, description]) => ({
+        label: key,
+        description,
+        shortcutMenu: true as const,
+      })),
+    ]);
+  };
+
+  const closeShortcutMenu = (): void => {
+    const state = explorerStateBeforeShortcutMenu;
+    if (!shortcutMenuOpen || !state) {
+      return;
+    }
+
+    quickPick.value = state.value;
+    quickPick.title = state.title;
+    quickPick.placeholder = state.placeholder;
+    quickPick.prompt = state.prompt;
+    quickPick.matchOnDescription = state.matchOnDescription;
+    quickPick.items = state.items;
+    quickPick.activeItems = state.activeItems.filter(
+      (item): item is ExplorerQuickPickItem => 'uri' in item && 'entryKind' in item,
+    );
+    visibleEntries = state.visibleEntries;
+    shortcutMenuOpen = false;
+    explorerStateBeforeShortcutMenu = undefined;
+    quickPick.buttons = [shortcutsButton];
+    setNavigationMode(state.treeNavigationMode);
+  };
+
+  quickPick.onDidTriggerButton((button) => {
+    if (button === shortcutsButton) {
+      openShortcutMenu();
+    } else if (button === vscode.QuickInputButtons.Back) {
+      closeShortcutMenu();
+    }
+  });
+
+  const toggleHiddenFiles = (): void => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+    reopen(getActiveItem()?.uri, currentCutUri, !showExcludedEntries);
+  };
+
   quickPick.onDidChangeActive((items) => {
+    if (shortcutMenuOpen) {
+      return;
+    }
     if (treeNavigationMode && items[0]) {
-      lastActiveUri = items[0].uri;
+      const activeItem = items[0];
+      if (isExplorerQuickPickItem(activeItem)) {
+        lastActiveUri = activeItem.uri;
+      }
     } else if (!treeNavigationMode && items.length > 0) {
       quickPick.activeItems = [];
     }
@@ -150,7 +393,32 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
       return entry.children ?? [];
     }
 
+    const filter = getVisibilityFilter();
     const entries = await vscode.workspace.fs.readDirectory(entry.uri);
+    let visibleEntryIds: Set<string> | undefined;
+    if (filter.excludePattern) {
+      const directoryId = entry.uri.toString();
+      visibleEntryIds = visibleEntryIdsByDirectory.get(directoryId);
+      if (!visibleEntryIds) {
+        visibleEntryIds = new Set<string>();
+        const workspaceFolder = vscode.workspace.getWorkspaceFolder(entry.uri);
+        const files = await vscode.workspace.findFiles(
+          new vscode.RelativePattern(entry.uri, '**/*'),
+          workspaceFolder
+            ? new vscode.RelativePattern(workspaceFolder, filter.excludePattern)
+            : null,
+        );
+        for (const file of files) {
+          let current = file;
+          while (current.toString() !== entry.uri.toString()
+            && current.path.startsWith(`${entry.uri.path.replace(/\/$/, '')}/`)) {
+            visibleEntryIds.add(current.toString());
+            current = vscode.Uri.joinPath(current, '..');
+          }
+        }
+        visibleEntryIdsByDirectory.set(directoryId, visibleEntryIds);
+      }
+    }
     entry.children = entries
       .map(([name, type]) => ({
         uri: vscode.Uri.joinPath(entry.uri, name),
@@ -159,6 +427,7 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
         loaded: false,
         expanded: false,
       }))
+      .filter((child) => !visibleEntryIds || visibleEntryIds.has(child.uri.toString()))
       .sort((left, right) => {
         if (left.kind !== right.kind) {
           return left.kind === 'directory' ? -1 : 1;
@@ -263,8 +532,10 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
     }
   };
 
-  const getActiveItem = (): ExplorerQuickPickItem | undefined =>
-    quickPick.activeItems[0] ?? quickPick.items[0];
+  const getActiveItem = (): ExplorerQuickPickItem | undefined => {
+    const item = quickPick.activeItems[0] ?? quickPick.items[0];
+    return isExplorerQuickPickItem(item) ? item : undefined;
+  };
 
   const toggleFolder = (uri: vscode.Uri): void => {
     const entry = findEntry(visibleEntries, uri);
@@ -278,6 +549,10 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   };
 
   const collapseAllFolders = (): void => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+
     const collapse = (entries: ExplorerEntry[]): void => {
       for (const entry of entries) {
         if (entry.kind === 'directory') {
@@ -310,36 +585,131 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
       return;
     }
 
-    const entryKind = activeItem.entryKind === 'directory' ? 'folder' : 'file';
     const parentUri = vscode.Uri.joinPath(activeItem.uri, '..');
-    const confirmationPromise = vscode.window.showInputBox({
+    const removeEntry = async (): Promise<void> => {
+      try {
+        if (activeItem.entryKind === 'directory') {
+          await vscode.workspace.fs.delete(activeItem.uri, { recursive: true, useTrash: true });
+        } else {
+          await vscode.commands.executeCommand(
+            'popupFileExplorer._deleteFileWithUndo',
+            activeItem.uri,
+          );
+        }
+        reopen(parentUri);
+      } catch (error) {
+        showError(error);
+      }
+    };
+
+    if (activeItem.entryKind === 'file') {
+      void removeEntry();
+      return;
+    }
+
+    void vscode.window.showInputBox({
       title: 'Confirm Removal',
-      prompt: `Do you really want to remove this ${entryKind}? Type YES to confirm.`,
+      prompt: 'Do you really want to remove this folder? Type YES to confirm.',
       placeHolder: 'Type YES to confirm',
       ignoreFocusOut: true,
       validateInput: (value) => value === 'YES' ? undefined : 'Type YES to confirm removal.',
-    });
+    }).then((confirmation) => {
+      if (confirmation === 'YES') {
+        void removeEntry();
+      } else {
+        reopen(activeItem.uri);
+      }
+    }, showError);
+  };
 
-    void confirmationPromise.then(async (confirmation) => {
-      if (confirmation !== 'YES') {
-        openExplorer(activeItem.uri);
+  const cutActiveEntry = (): void => {
+    const activeItem = getActiveItem();
+    if (!activeItem) {
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(activeItem.uri);
+    if (!workspaceFolder || activeItem.uri.toString() === workspaceFolder.uri.toString()) {
+      void vscode.window.showErrorMessage('Popup File Explorer: Select a workspace file or non-root folder to cut.');
+      return;
+    }
+
+    currentCutUri = activeItem.uri;
+    setNavigationMode(treeNavigationMode);
+  };
+
+  const pasteEntry = async (): Promise<void> => {
+    if (!currentCutUri) {
+      void vscode.window.showInformationMessage('Popup File Explorer: No cut file or folder to paste.');
+      return;
+    }
+
+    const sourceUri = currentCutUri;
+    const sourceFolder = vscode.workspace.getWorkspaceFolder(sourceUri);
+    if (!sourceFolder || sourceUri.toString() === sourceFolder.uri.toString()) {
+      void vscode.window.showErrorMessage('Popup File Explorer: The cut entry is no longer available.');
+      return;
+    }
+
+    const activeItem = getActiveItem();
+    const activeEntry = activeItem ? findEntry(visibleEntries, activeItem.uri) : undefined;
+    const destinationDirectory = activeEntry
+      ? activeEntry.kind === 'directory'
+        ? activeEntry.uri
+        : vscode.Uri.joinPath(activeEntry.uri, '..')
+      : roots[0]?.uri;
+    if (!destinationDirectory) {
+      void vscode.window.showErrorMessage('Popup File Explorer: Select a destination folder first.');
+      return;
+    }
+
+    try {
+      const sourceStat = await vscode.workspace.fs.stat(sourceUri);
+      const destinationStat = await vscode.workspace.fs.stat(destinationDirectory);
+      if ((destinationStat.type & vscode.FileType.Directory) === 0) {
+        throw new Error('The selected paste destination is not a folder.');
+      }
+      if ((sourceStat.type & vscode.FileType.Directory) !== 0
+        && (destinationDirectory.toString() === sourceUri.toString()
+          || destinationDirectory.scheme === sourceUri.scheme
+          && destinationDirectory.authority === sourceUri.authority
+          && destinationDirectory.path.startsWith(`${sourceUri.path.replace(/\/$/, '')}/`))) {
+        throw new Error('A folder cannot be moved into itself or one of its subfolders.');
+      }
+
+      const newUri = vscode.Uri.joinPath(destinationDirectory, sourceUri.path.split('/').pop() ?? '');
+      if (newUri.toString() === sourceUri.toString()) {
+        currentCutUri = undefined;
+        setNavigationMode(treeNavigationMode);
         return;
       }
 
       try {
-        await vscode.workspace.fs.delete(activeItem.uri, {
-          recursive: activeItem.entryKind === 'directory',
-          useTrash: true,
-        });
-        openExplorer(parentUri);
+        await vscode.workspace.fs.stat(newUri);
+        throw new Error('An entry with that name already exists at the destination.');
       } catch (error) {
-        showError(error);
-        openExplorer(activeItem.uri);
+        if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') {
+          throw error;
+        }
       }
-    }, (error: unknown) => {
+
+      await vscode.workspace.fs.rename(sourceUri, newUri, { overwrite: false });
+      currentCutUri = undefined;
+      reopen(newUri, undefined);
+    } catch (error) {
       showError(error);
-      openExplorer(activeItem.uri);
-    });
+    }
+  };
+
+  const undoDelete = async (): Promise<void> => {
+    try {
+      const restoredUri = await vscode.commands.executeCommand<string>('popupFileExplorer._undoDelete');
+      if (restoredUri) {
+        reopen(vscode.Uri.parse(restoredUri));
+      }
+    } catch (error) {
+      showError(error);
+    }
   };
 
   const renameActiveEntry = (): void => {
@@ -378,27 +748,27 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
 
     void input.then(async (value) => {
       if (value === undefined) {
-        openExplorer(activeItem.uri);
+        reopen(activeItem.uri);
         return;
       }
 
       const newName = value.trim();
       const newUri = vscode.Uri.joinPath(parentUri, newName);
       if (newUri.toString() === activeItem.uri.toString()) {
-        openExplorer(activeItem.uri);
+        reopen(activeItem.uri);
         return;
       }
 
       try {
         await vscode.workspace.fs.rename(activeItem.uri, newUri, { overwrite: false });
-        openExplorer(newUri);
+        reopen(newUri);
       } catch (error) {
         showError(error);
-        openExplorer(activeItem.uri);
+        reopen(activeItem.uri);
       }
     }, (error: unknown) => {
       showError(error);
-      openExplorer(activeItem.uri);
+      reopen(activeItem.uri);
     });
   };
 
@@ -435,7 +805,7 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
       },
     }).then(async (value) => {
       if (value === undefined) {
-        openExplorer(activeItem?.uri);
+        reopen(activeItem?.uri);
         return;
       }
 
@@ -460,24 +830,28 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
             throw new Error(`Could not create "${name}".`);
           }
         }
-        openExplorer(uri);
+        reopen(uri);
       } catch (error) {
         showError(error);
-        openExplorer(activeItem?.uri);
+        reopen(activeItem?.uri);
       }
     }, showError);
   };
 
-  popupActions = {
+  const actions: PopupActions = {
     moveActiveItem: (offset) => {
+      if (shortcutMenuOpen) {
+        return;
+      }
       const items = quickPick.items;
-      if (items.length === 0) {
+      const explorerItems = items.filter(isExplorerQuickPickItem);
+      if (explorerItems.length === 0) {
         return;
       }
 
-      const activeIndex = items.findIndex((item) => item.uri.toString() === getActiveItem()?.uri.toString());
-      const nextIndex = Math.max(0, Math.min(items.length - 1, (activeIndex < 0 ? 0 : activeIndex) + offset));
-      quickPick.activeItems = [items[nextIndex]];
+      const activeIndex = explorerItems.findIndex((item) => item.uri.toString() === getActiveItem()?.uri.toString());
+      const nextIndex = Math.max(0, Math.min(explorerItems.length - 1, (activeIndex < 0 ? 0 : activeIndex) + offset));
+      quickPick.activeItems = [explorerItems[nextIndex]];
     },
     toggleActiveFolder: () => {
       const item = getActiveItem();
@@ -487,11 +861,16 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
     },
     deleteActiveEntry,
     renameActiveEntry,
+    cutActiveEntry,
+    pasteEntry,
+    undoDelete,
     collapseAllFolders,
+    toggleHiddenFiles,
     startCreateEntry,
     setNavigationMode,
     toggleNavigationMode,
   };
+  popupActions = actions;
 
   const addSearchPath = (folderUri: vscode.Uri, fileUri: vscode.Uri, rootsById: Map<string, ExplorerEntry>): void => {
     const root = rootsById.get(folderUri.toString());
@@ -540,7 +919,8 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
     searchMode = true;
     quickPick.matchOnDescription = false;
     quickPick.busy = true;
-    const files = await vscode.workspace.findFiles('**/*', null, 1000);
+    const visibilityFilter = getVisibilityFilter();
+    const files = await vscode.workspace.findFiles('**/*', visibilityFilter.excludePattern ?? null, 1000);
     if (request !== searchRequest) {
       return;
     }
@@ -557,7 +937,8 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
 
     for (const file of files) {
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(file);
-      if (workspaceFolder && file.path.toLowerCase().includes(query)) {
+      if (workspaceFolder
+        && file.path.toLowerCase().includes(query)) {
         addSearchPath(workspaceFolder.uri, file, rootsById);
       }
     }
@@ -592,6 +973,10 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   };
 
   quickPick.onDidChangeValue((value) => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+
     setNavigationMode(false);
     const request = ++searchRequest;
     quickPick.placeholder = roots.length
@@ -604,8 +989,12 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   });
 
   quickPick.onDidAccept(() => {
+    if (shortcutMenuOpen) {
+      return;
+    }
+
     const selected = quickPick.activeItems[0] ?? quickPick.selectedItems[0];
-    if (!selected) {
+    if (!isExplorerQuickPickItem(selected)) {
       return;
     }
 
@@ -623,9 +1012,11 @@ function openExplorer(initialSelectionUri?: vscode.Uri): void {
   });
 
   quickPick.onDidHide(() => {
-    popupActions = undefined;
-    setContext('popupFileExplorerVisible', false);
-    setNavigationMode(false);
+    if (popupActions === actions) {
+      popupActions = undefined;
+      setContext('popupFileExplorerVisible', false);
+      setNavigationMode(false);
+    }
     quickPick.dispose();
   });
   setContext('popupFileExplorerVisible', true);

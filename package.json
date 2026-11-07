@@ -41,8 +41,24 @@
         "title": "Popup File Explorer: Rename Selected File or Folder"
       },
       {
+        "command": "popupFileExplorer.cutEntry",
+        "title": "Popup File Explorer: Cut Selected File or Folder"
+      },
+      {
+        "command": "popupFileExplorer.pasteEntry",
+        "title": "Popup File Explorer: Paste Cut File or Folder"
+      },
+      {
+        "command": "popupFileExplorer.undoDelete",
+        "title": "Popup File Explorer: Undo Last File Removal"
+      },
+      {
         "command": "popupFileExplorer.collapseAll",
         "title": "Popup File Explorer: Collapse All Folders"
+      },
+      {
+        "command": "popupFileExplorer.toggleHiddenFiles",
+        "title": "Popup File Explorer: Toggle Excluded Files"
       },
       {
         "command": "popupFileExplorer.focusTree",
@@ -97,8 +113,31 @@
         "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
       },
       {
+        "command": "popupFileExplorer.cutEntry",
+        "key": "ctrl+x",
+        "mac": "cmd+x",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.pasteEntry",
+        "key": "ctrl+v",
+        "mac": "cmd+v",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.undoDelete",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
         "command": "popupFileExplorer.collapseAll",
         "key": "a",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.toggleHiddenFiles",
+        "key": "h",
         "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
       },
       {
