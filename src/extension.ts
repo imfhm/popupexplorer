@@ -32,7 +32,9 @@ interface PopupActions {
   deleteActiveEntry: () => void;
   renameActiveEntry: () => void;
   cutActiveEntry: () => void;
+  copyActiveEntry: () => void;
   pasteEntry: () => void;
+  duplicateActiveEntry: () => void;
   undoDelete: () => void;
   collapseAllFolders: () => void;
   toggleHiddenFiles: () => void;
@@ -83,8 +85,16 @@ export function activate(context: vscode.ExtensionContext): void {
       () => popupActions?.cutActiveEntry(),
     ),
     vscode.commands.registerCommand(
+      'popupFileExplorer.copyEntry',
+      () => popupActions?.copyActiveEntry(),
+    ),
+    vscode.commands.registerCommand(
       'popupFileExplorer.pasteEntry',
       () => popupActions?.pasteEntry(),
+    ),
+    vscode.commands.registerCommand(
+      'popupFileExplorer.duplicateEntry',
+      () => popupActions?.duplicateActiveEntry(),
     ),
     vscode.commands.registerCommand(
       'popupFileExplorer.undoDelete',
@@ -167,9 +177,11 @@ function openExplorer(
   initialSelectionUri?: vscode.Uri,
   cutUri?: vscode.Uri,
   includeExcludedEntries = false,
+  copyUri?: vscode.Uri,
 ): void {
   const quickPick = vscode.window.createQuickPick<PopupQuickPickItem>();
   let currentCutUri = cutUri;
+  let currentCopyUri = copyUri;
   let showExcludedEntries = includeExcludedEntries;
   const roots: ExplorerEntry[] = (vscode.workspace.workspaceFolders ?? []).map((folder) => ({
     uri: folder.uri,
@@ -211,8 +223,9 @@ function openExplorer(
       ['R', 'Rename selected file or folder'],
       ['N / M', 'Create file / folder'],
       ['H', 'Show or hide Files: Exclude entries'],
-      ['Ctrl+X / Ctrl+V', 'Cut / paste selected entry'],
-      ['Ctrl+Z', 'Restore the last removed file'],
+        ['Ctrl+X / Ctrl+C / Ctrl+V', 'Cut / copy / paste selected entry'],
+        ['Ctrl+D', 'Duplicate selected entry'],
+        ['Ctrl+Z', 'Restore the last removed file'],
     ] },
     { category: 'Focus and search', bindings: [
       ['Tab', 'Toggle Explorer / Search'],
@@ -242,8 +255,9 @@ function openExplorer(
     uri?: vscode.Uri,
     nextCutUri = currentCutUri,
     nextIncludeExcludedEntries = showExcludedEntries,
+    nextCopyUri = currentCopyUri,
   ): void => {
-    openExplorer(context, uri, nextCutUri, nextIncludeExcludedEntries);
+    openExplorer(context, uri, nextCutUri, nextIncludeExcludedEntries, nextCopyUri);
   };
 
   const getVisibilityFilter = (): ExplorerVisibilityFilter => {
@@ -286,8 +300,9 @@ function openExplorer(
       ) ?? quickPick.items[0];
       quickPick.activeItems = isExplorerQuickPickItem(activeItem) ? [activeItem] : [];
     }
-    const cutHint = currentCutUri
-      ? ` | CUT: ${currentCutUri.path.split('/').pop()}  Ctrl+V: move`
+    const clipboardUri = currentCutUri ?? currentCopyUri;
+    const cutHint = clipboardUri
+      ? ` | ${currentCutUri ? 'CUT' : 'COPIED'}: ${clipboardUri.path.split('/').pop()}  Ctrl+V: ${currentCutUri ? 'move' : 'copy'}`
       : '';
     quickPick.prompt = enabled
       ? `EXPLORER${cutHint}`
@@ -415,6 +430,13 @@ function openExplorer(
             visibleEntryIds.add(current.toString());
             current = vscode.Uri.joinPath(current, '..');
           }
+        }
+        let selected = initialSelectionUri;
+        while (selected
+          && selected.toString() !== entry.uri.toString()
+          && selected.path.startsWith(`${entry.uri.path.replace(/\/$/, '')}/`)) {
+          visibleEntryIds.add(selected.toString());
+          selected = vscode.Uri.joinPath(selected, '..');
         }
         visibleEntryIdsByDirectory.set(directoryId, visibleEntryIds);
       }
@@ -586,6 +608,15 @@ function openExplorer(
     }
 
     const parentUri = vscode.Uri.joinPath(activeItem.uri, '..');
+    const parentEntry = findEntry(visibleEntries, parentUri);
+    const siblings = parentEntry?.children ?? [];
+    const deletedIndex = siblings.findIndex((entry) => entry.uri.toString() === activeItem.uri.toString());
+    const nextFileUri = deletedIndex < 0
+      ? undefined
+      : [
+        ...siblings.slice(deletedIndex + 1),
+        ...siblings.slice(0, deletedIndex).reverse(),
+      ].find((entry) => entry.kind === 'file')?.uri;
     const removeEntry = async (): Promise<void> => {
       try {
         if (activeItem.entryKind === 'directory') {
@@ -596,7 +627,7 @@ function openExplorer(
             activeItem.uri,
           );
         }
-        reopen(parentUri);
+        reopen(nextFileUri ?? parentUri);
       } catch (error) {
         showError(error);
       }
@@ -635,19 +666,62 @@ function openExplorer(
     }
 
     currentCutUri = activeItem.uri;
+    currentCopyUri = undefined;
     setNavigationMode(treeNavigationMode);
   };
 
-  const pasteEntry = async (): Promise<void> => {
-    if (!currentCutUri) {
-      void vscode.window.showInformationMessage('Popup File Explorer: No cut file or folder to paste.');
+  const copyActiveEntry = (): void => {
+    const activeItem = getActiveItem();
+    if (!activeItem) {
       return;
     }
 
-    const sourceUri = currentCutUri;
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(activeItem.uri);
+    if (!workspaceFolder || activeItem.uri.toString() === workspaceFolder.uri.toString()) {
+      void vscode.window.showErrorMessage('Popup File Explorer: Select a workspace file or non-root folder to copy.');
+      return;
+    }
+
+    currentCutUri = undefined;
+    currentCopyUri = activeItem.uri;
+    setNavigationMode(treeNavigationMode);
+  };
+
+  const getUniqueCopyUri = async (
+    directory: vscode.Uri,
+    sourceUri: vscode.Uri,
+    isDirectory: boolean,
+  ): Promise<vscode.Uri> => {
+    const name = sourceUri.path.split('/').pop() ?? '';
+    const extensionIndex = isDirectory ? -1 : name.lastIndexOf('.');
+    const stem = extensionIndex > 0 ? name.slice(0, extensionIndex) : name;
+    const extension = extensionIndex > 0 ? name.slice(extensionIndex) : '';
+
+    for (let suffix = 1; ; suffix += 1) {
+      const copyName = suffix === 1 ? `${stem} copy${extension}` : `${stem} copy ${suffix}${extension}`;
+      const copyUri = vscode.Uri.joinPath(directory, copyName);
+      try {
+        await vscode.workspace.fs.stat(copyUri);
+      } catch (error) {
+        if (error instanceof vscode.FileSystemError && error.code === 'FileNotFound') {
+          return copyUri;
+        }
+        throw error;
+      }
+    }
+  };
+
+  const pasteEntry = async (): Promise<void> => {
+    const sourceUri = currentCutUri ?? currentCopyUri;
+    if (!sourceUri) {
+      void vscode.window.showInformationMessage('Popup File Explorer: No cut or copied file or folder to paste.');
+      return;
+    }
+
+    const isCopy = currentCopyUri !== undefined;
     const sourceFolder = vscode.workspace.getWorkspaceFolder(sourceUri);
     if (!sourceFolder || sourceUri.toString() === sourceFolder.uri.toString()) {
-      void vscode.window.showErrorMessage('Popup File Explorer: The cut entry is no longer available.');
+      void vscode.window.showErrorMessage('Popup File Explorer: The cut or copied entry is no longer available.');
       return;
     }
 
@@ -677,25 +751,64 @@ function openExplorer(
         throw new Error('A folder cannot be moved into itself or one of its subfolders.');
       }
 
-      const newUri = vscode.Uri.joinPath(destinationDirectory, sourceUri.path.split('/').pop() ?? '');
-      if (newUri.toString() === sourceUri.toString()) {
+      if (!isCopy && destinationDirectory.toString() === vscode.Uri.joinPath(sourceUri, '..').toString()) {
         currentCutUri = undefined;
         setNavigationMode(treeNavigationMode);
         return;
       }
 
-      try {
-        await vscode.workspace.fs.stat(newUri);
-        throw new Error('An entry with that name already exists at the destination.');
-      } catch (error) {
-        if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') {
-          throw error;
+      let newUri: vscode.Uri;
+      if (isCopy) {
+        newUri = await getUniqueCopyUri(
+          destinationDirectory,
+          sourceUri,
+          (sourceStat.type & vscode.FileType.Directory) !== 0,
+        );
+        await vscode.workspace.fs.copy(sourceUri, newUri, { overwrite: false });
+      } else {
+        newUri = vscode.Uri.joinPath(destinationDirectory, sourceUri.path.split('/').pop() ?? '');
+        try {
+          await vscode.workspace.fs.stat(newUri);
+          throw new Error('An entry with that name already exists at the destination.');
+        } catch (error) {
+          if (!(error instanceof vscode.FileSystemError) || error.code !== 'FileNotFound') {
+            throw error;
+          }
         }
+        await vscode.workspace.fs.rename(sourceUri, newUri, { overwrite: false });
       }
 
-      await vscode.workspace.fs.rename(sourceUri, newUri, { overwrite: false });
-      currentCutUri = undefined;
-      reopen(newUri, undefined);
+      if (!isCopy) {
+        currentCutUri = undefined;
+      }
+      reopen(newUri, currentCutUri, showExcludedEntries, currentCopyUri);
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const duplicateActiveEntry = async (): Promise<void> => {
+    const activeItem = getActiveItem();
+    if (!activeItem) {
+      return;
+    }
+
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(activeItem.uri);
+    if (!workspaceFolder || activeItem.uri.toString() === workspaceFolder.uri.toString()) {
+      void vscode.window.showErrorMessage('Popup File Explorer: Select a workspace file or non-root folder to duplicate.');
+      return;
+    }
+
+    try {
+      const sourceStat = await vscode.workspace.fs.stat(activeItem.uri);
+      const parentUri = vscode.Uri.joinPath(activeItem.uri, '..');
+      const duplicateUri = await getUniqueCopyUri(
+        parentUri,
+        activeItem.uri,
+        (sourceStat.type & vscode.FileType.Directory) !== 0,
+      );
+      await vscode.workspace.fs.copy(activeItem.uri, duplicateUri, { overwrite: false });
+      reopen(duplicateUri);
     } catch (error) {
       showError(error);
     }
@@ -862,7 +975,9 @@ function openExplorer(
     deleteActiveEntry,
     renameActiveEntry,
     cutActiveEntry,
+    copyActiveEntry,
     pasteEntry,
+    duplicateActiveEntry,
     undoDelete,
     collapseAllFolders,
     toggleHiddenFiles,
@@ -920,7 +1035,7 @@ function openExplorer(
     quickPick.matchOnDescription = false;
     quickPick.busy = true;
     const visibilityFilter = getVisibilityFilter();
-    const files = await vscode.workspace.findFiles('**/*', visibilityFilter.excludePattern ?? null, 1000);
+    const files = await vscode.workspace.findFiles('**/*', visibilityFilter.excludePattern ?? null);
     if (request !== searchRequest) {
       return;
     }

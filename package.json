@@ -45,8 +45,16 @@
         "title": "Popup File Explorer: Cut Selected File or Folder"
       },
       {
+        "command": "popupFileExplorer.copyEntry",
+        "title": "Popup File Explorer: Copy Selected File or Folder"
+      },
+      {
         "command": "popupFileExplorer.pasteEntry",
-        "title": "Popup File Explorer: Paste Cut File or Folder"
+        "title": "Popup File Explorer: Paste Cut or Copied File or Folder"
+      },
+      {
+        "command": "popupFileExplorer.duplicateEntry",
+        "title": "Popup File Explorer: Duplicate Selected File or Folder"
       },
       {
         "command": "popupFileExplorer.undoDelete",
@@ -119,9 +127,21 @@
         "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
       },
       {
+        "command": "popupFileExplorer.copyEntry",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
         "command": "popupFileExplorer.pasteEntry",
         "key": "ctrl+v",
         "mac": "cmd+v",
+        "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
+      },
+      {
+        "command": "popupFileExplorer.duplicateEntry",
+        "key": "ctrl+d",
+        "mac": "cmd+d",
         "when": "popupFileExplorerVisible && popupFileExplorerTreeFocus"
       },
       {
